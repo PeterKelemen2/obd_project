@@ -5,7 +5,7 @@ use serialport::SerialPort;
 
 use crate::command::{pids, ObdCommand};
 use crate::error::ObdError;
-use crate::pid::{decode_coolant_temp, decode_engine_rpm, decode_vehicle_speed};
+use crate::pid::{decode_coolant_temp, decode_engine_rpm, decode_vehicle_speed, PidDecode};
 use crate::response::parse_hex_bytes;
 
 // ---------------------------------------------------------------------------
@@ -30,11 +30,11 @@ const READ_BUF_SIZE: usize = 256;
 
 /// AT commands sent during [`ObdConnection::initialize`].
 const INIT_COMMANDS: &[&str] = &[
-    "ATZ\r",    // Reset all
-    "ATE0\r",   // Echo off
-    "ATL0\r",   // Linefeeds off
-    "ATS0\r",   // Spaces off  (some builds use spaces; keep for compatibility)
-    "ATH0\r",   // Headers off
+    "ATZ\r",  // Reset all
+    "ATE0\r", // Echo off
+    "ATL0\r", // Linefeeds off
+    "ATS0\r", // Spaces off  (some builds use spaces; keep for compatibility)
+    "ATH0\r", // Headers off
 ];
 
 // ---------------------------------------------------------------------------
@@ -221,9 +221,44 @@ impl ObdConnection {
         self.conn.send_command(cmd)
     }
 
+    pub fn query_supported_pids(&mut self) -> Result<Vec<u8>, ObdError> {
+        use crate::pid::decode_supported_pids;
+
+        // OBD-II splits supported PIDs into blocks of 32.
+        // PID 0x00 = supported PIDs 01-20
+        // PID 0x20 = supported PIDs 21-40
+        // PID 0x40 = supported PIDs 41-60
+        let range_bases: &[u8] = &[0x00, 0x20, 0x40];
+        let mut all_supported = Vec::new();
+
+        for &base in range_bases {
+            let cmd = ObdCommand::new(0x01, base);
+            let raw = self.query_raw(cmd)?;
+            let pids = decode_supported_pids(&raw, base)?;
+
+            // PID 0x20/0x40/0x60 being supported means the next range exists.
+            // We use that to decide whether to keep querying.
+            let has_next_range = pids.contains(&(base + 0x20));
+            all_supported.extend(pids);
+
+            if !has_next_range {
+                break; // No more ranges supported, stop here
+            }
+        }
+
+        Ok(all_supported)
+    }
+
     // -----------------------------------------------------------------------
     // PID queries
     // -----------------------------------------------------------------------
+
+    /// Query a PID and decode the result into any type that implements `PidDecode`.
+    /// Rust infers which decoder to use from the expected return type.
+    pub fn query<T: PidDecode>(&mut self, cmd: ObdCommand) -> Result<T, ObdError> {
+        let raw = self.query_raw(cmd)?;
+        T::decode(cmd.pid, &raw)
+    }
 
     /// Query the current engine RPM.
     ///

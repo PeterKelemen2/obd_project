@@ -1,6 +1,63 @@
 use crate::error::ObdError;
 use crate::response::extract_data_bytes;
 
+/// Query which PIDs (01–20) the vehicle supports.
+/// Returns a Vec of supported PID numbers.
+pub fn decode_supported_pids(raw: &[u8], base_pid: u8) -> Result<Vec<u8>, ObdError> {
+    let data = extract_data_bytes(raw, 4)?;
+
+    // The 4 bytes form a 32-bit bitmask.
+    // Bit 31 (MSB) = PID base+1, Bit 0 (LSB) = PID base+32
+    let bitmask = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+    let mut supported = Vec::new();
+    for bit in 0..32u8 {
+        // bit 31 corresponds to base_pid+1, bit 0 to base_pid+32
+        if bitmask & (1 << (31 - bit)) != 0 {
+            supported.push(base_pid + bit + 1);
+        }
+    }
+
+    Ok(supported)
+}
+
+pub trait PidDecode: Sized {
+    fn decode(pid: u8, raw: &[u8]) -> Result<Self, ObdError>;
+}
+
+impl PidDecode for f32 {
+    fn decode(pid: u8, raw: &[u8]) -> Result<Self, ObdError> {
+        match pid {
+            0x0C => decode_engine_rpm(raw),
+            0x11 => decode_throttle_position(raw),
+            0x2F => decode_fuel_level(raw),
+            _ => Err(ObdError::Parse(format!(
+                "No f32 decoder for PID {pid:#04X}"
+            ))),
+        }
+    }
+}
+
+impl PidDecode for u8 {
+    fn decode(pid: u8, raw: &[u8]) -> Result<Self, ObdError> {
+        match pid {
+            0x0D => decode_vehicle_speed(raw),
+            _ => Err(ObdError::Parse(format!("No u8 decoder for PID {pid:#04X}"))),
+        }
+    }
+}
+
+impl PidDecode for i16 {
+    fn decode(pid: u8, raw: &[u8]) -> Result<Self, ObdError> {
+        match pid {
+            0x05 => decode_coolant_temp(raw),
+            _ => Err(ObdError::Parse(format!(
+                "No i16 decoder for PID {pid:#04X}"
+            ))),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Individual PID decoders
 // ---------------------------------------------------------------------------
