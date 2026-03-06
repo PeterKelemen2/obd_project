@@ -35,6 +35,8 @@ const INIT_COMMANDS: &[&str] = &[
     "ATL0\r", // Linefeeds off
     "ATS0\r", // Spaces off  (some builds use spaces; keep for compatibility)
     "ATH0\r", // Headers off
+    "ATSP0\r",
+    "ATRV\r",
 ];
 
 // ---------------------------------------------------------------------------
@@ -84,10 +86,11 @@ impl SerialConnection {
     ///
     /// * [`ObdError::Io`] – if writing or reading the port fails.
     /// * [`ObdError::Timeout`] – if no `>` prompt is received within the timeout.
-    pub fn send_command(&mut self, cmd: &str) -> Result<String, ObdError> {
-        // Flush any leftover bytes
-        self.port.flush()?;
+    // Increase timeout — SEARCHING can take several seconds
+    const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 
+    pub fn send_command(&mut self, cmd: &str) -> Result<String, ObdError> {
+        self.port.flush()?;
         self.port.write_all(cmd.as_bytes())?;
 
         let mut response = Vec::with_capacity(READ_BUF_SIZE);
@@ -95,31 +98,45 @@ impl SerialConnection {
 
         loop {
             match self.port.read(&mut buf) {
-                Ok(0) => break, // Port closed / EOF
+                Ok(0) => break,
                 Ok(_) => {
                     if buf[0] == ELM_PROMPT {
-                        break; // ELM327 is ready for the next command
+                        break; // Only stop at the prompt — never timeout mid-response
                     }
                     response.push(buf[0]);
                     if response.len() >= READ_BUF_SIZE {
-                        break; // Safety: never block forever
+                        break;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::TimedOut => {
-                    if response.is_empty() {
-                        return Err(ObdError::Timeout);
-                    }
-                    break; // Partial response received before timeout
+                    return Err(ObdError::Timeout); // Timeout only if we got nothing at all
                 }
                 Err(e) => return Err(ObdError::Io(e)),
             }
         }
 
         let text = String::from_utf8_lossy(&response).into_owned();
-        Ok(text.trim().to_owned())
+        println!("[DEBUG raw] {:?}", text);
+
+        let result = text
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty())
+            .filter(|l| !is_status_message(l))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        Ok(result)
     }
 }
 
+fn is_status_message(line: &str) -> bool {
+    let upper = line.to_uppercase();
+    upper.starts_with("SEARCHING")
+        || upper.starts_with("BUS INIT")
+        || upper.starts_with("TRYING")
+        || upper.starts_with("AUTO")
+}
 // ---------------------------------------------------------------------------
 // ObdConnection – high-level API
 // ---------------------------------------------------------------------------
@@ -188,8 +205,16 @@ impl ObdConnection {
     pub fn initialize(&mut self) -> Result<(), ObdError> {
         for cmd in INIT_COMMANDS {
             let resp = self.conn.send_command(cmd)?;
-            // ATZ returns the version banner; other AT commands return "OK".
-            // We treat any adapter-error token as a fatal init failure.
+            println!("[INIT] {} -> {:?}", cmd.trim(), resp);
+
+            // Give the adapter time to process each command
+            std::thread::sleep(std::time::Duration::from_millis(200));
+
+            // ATZ needs extra time to fully reset
+            if cmd.starts_with("ATZ") {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+
             let upper = resp.to_uppercase();
             for token in &["ERROR", "UNABLE TO CONNECT", "BUS ERROR"] {
                 if upper.contains(token) {
