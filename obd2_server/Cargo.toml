@@ -1,0 +1,7 @@
+[package]
+name = "obd2_server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+obd2_reader = { path = "../obd2_reader" }

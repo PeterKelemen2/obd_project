@@ -1,0 +1,5 @@
+[workspace]
+members = [
+    "obd2_reader",
+    "obd2_server"
+]
